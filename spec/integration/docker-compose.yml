@@ -1,0 +1,41 @@
+# Live Kong integration suite. Run from the repository root:
+#   docker compose -f spec/integration/docker-compose.yml up --abort-on-container-exit --exit-code-from tests
+services:
+  mock:
+    image: node:20-alpine
+    volumes: ["./mock:/app:ro"]
+    command: ["node", "/app/server.mjs"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9000/_health"]
+      interval: 2s
+      retries: 15
+
+  kong:
+    image: kong:${KONG_VERSION:-3.9}
+    depends_on:
+      mock: { condition: service_healthy }
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/kong.yml
+      KONG_PLUGINS: bundled,agent-guard
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+      KONG_ADMIN_LISTEN: 127.0.0.1:8001
+      KONG_LOG_LEVEL: info
+      ACR_API_KEY: test-api-key
+    volumes:
+      - ./kong.yml:/kong/kong.yml:ro
+      - ../../kong/plugins/agent-guard:/usr/local/share/lua/5.1/kong/plugins/agent-guard:ro
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 3s
+      retries: 30
+
+  tests:
+    image: node:20-alpine
+    depends_on:
+      kong: { condition: service_healthy }
+    environment:
+      KONG: http://kong:8000
+      MOCK: http://mock:9000
+    volumes: ["./run.mjs:/app/run.mjs:ro"]
+    command: ["node", "/app/run.mjs"]

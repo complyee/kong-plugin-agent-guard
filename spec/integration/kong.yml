@@ -1,0 +1,54 @@
+# Declarative (DB-less) Kong configuration for the live integration suite.
+_format_version: "3.0"
+
+services:
+  - name: upstream
+    url: http://mock:9000/upstream
+    routes:
+      - name: decide
+        paths: [/pay]
+        methods: [POST]
+        plugins:
+          - name: agent-guard
+            config:
+              gateway_url: http://mock:9000/acr
+              api_key: "{vault://env/acr-api-key}"
+              timeout_ms: 1000
+              action_map:
+                "POST /pay": payments.transfer.create
+      - name: unmapped
+        paths: [/unmapped]
+        plugins:
+          - name: agent-guard
+            config:
+              gateway_url: http://mock:9000/acr
+              api_key: "{vault://env/acr-api-key}"
+      - name: consumer
+        paths: [/consumer]
+        methods: [POST]
+        plugins:
+          - name: key-auth
+          - name: agent-guard
+            config:
+              gateway_url: http://mock:9000/acr
+              api_key: "{vault://env/acr-api-key}"
+              agent_source: consumer
+              action_map:
+                "POST /consumer": refunds.issue
+      - name: verified
+        paths: [/verified]
+        methods: [POST]
+        plugins:
+          - name: agent-guard
+            config:
+              mode: verify
+              gateway_url: http://mock:9000/acr
+              api_key: "{vault://env/acr-api-key}"
+              action_map:
+                "POST /verified": payments.transfer.create
+
+consumers:
+  - username: refund-bot
+    custom_id: agent-refund
+    keyauth_credentials:
+      - key: test-consumer-key
