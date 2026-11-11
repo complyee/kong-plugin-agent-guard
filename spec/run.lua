@@ -221,7 +221,9 @@ package.preload["resty.http"] = function()
   return { new = function()
     return {
       set_timeout = function() end,
-      request_uri = function()
+      request_uri = function(_, _, options)
+        state.http_calls = (state.http_calls or 0) + 1
+        state.last_http_request = options
         if state.http_err then return nil, state.http_err end
         return { body = json_encode(state.http_body or {}) }
       end,
@@ -520,6 +522,35 @@ ok(#state.timers == 1, "log: a 5xx upstream answer still schedules one report")
 setup({ status = 200 })
 handler.log(handler, base_conf())
 ok(#state.timers == 0, "log: no stashed decision means no report")
+
+setup({ status = 200 })
+kong.ctx.plugin.decision = { decisionId = "dec-1", payloadHash = "h" }
+handler.log(handler, base_conf())
+state.timers[1].fn(true, unpack(state.timers[1].args))
+ok((state.http_calls or 0) == 0, "log: premature timer sends no outcome report")
+
+setup({ status = 200, http_err = "connection refused" })
+kong.ctx.plugin.decision = { decisionId = "dec-1", payloadHash = "h" }
+handler.log(handler, base_conf())
+state.timers[1].fn(false, unpack(state.timers[1].args))
+ok(state.http_calls == 1 and #state.timers == 1,
+  "log: failed outcome delivery is attempted once without retry")
+
+setup({ status = 403 })
+kong.ctx.plugin.decision = { decisionId = "dec-1", payloadHash = "h" }
+handler.log(handler, base_conf())
+state.timers[1].fn(false, unpack(state.timers[1].args))
+local reported = json_decode(state.last_http_request.body)
+ok(reported.parameters.outcome == "executed",
+  "log: current 4xx mapping is proxy evidence, not business success")
+
+setup({ status = 502 })
+kong.ctx.plugin.decision = { decisionId = "dec-1", payloadHash = "h" }
+handler.log(handler, base_conf())
+state.timers[1].fn(false, unpack(state.timers[1].args))
+reported = json_decode(state.last_http_request.body)
+ok(reported.parameters.outcome == "downstream_error",
+  "log: 5xx is reported as downstream_error, not proof of no side effect")
 
 ----------------------------------------------------------------------
 print(("---\n%d passed, %d failed"):format(passed, failed))
