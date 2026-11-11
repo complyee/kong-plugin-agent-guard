@@ -1,10 +1,22 @@
 # Changelog
 
-## [0.1.1] - 2026-11-11
+## Unreleased
+
+- Tests (Theme C): live integration suite (`spec/integration/`) runs a real Kong 3.9 in Docker against a stand-in ACR and upstream, covering decide, verify, Consumer identity and outcome reports; GitHub Actions workflow `integration.yml`.
+
+- Outcome evidence (Theme B): 2xx → executed (202 marked http_202_accepted), 4xx/other statuses → aborted, 5xx/timeouts → downstream_error; every report carries its HTTP detailCode. These are proxy observations, not confirmed business completion.
+- Log timer scheduling failures, premature shutdown callbacks and report failures with decision ids; still best-effort, without retries or durable storage.
+- Reject non-2xx, invalid JSON and application-error ACR replies; never log response bodies or keys.
+- Keep offline modes free of outcome-report timers; document upstream-owned completion/reconciliation and the one-outcome-per-decision boundary.
+
+- Security (Theme A): route mappings always win; unmapped action headers require explicit `allow_action_header = true`. Existing header-only configurations must opt in or add route mappings.
+- Security: shared agent resolution across all modes, with authenticated Consumer and verified-JWT adapter sources; no fallback to client headers for these sources.
+- Security: body read errors refuse instead of hashing an empty string; online `resourceRef` includes the query string. Offline signatures still bind agent, action and body, not the query.
+- Release pending: no version/tag change yet; real Kong authentication integration checks remain required before production deployment.
 
 - Documentation: separate policy holds, execution attempts and unknown outcomes; require stable upstream business-operation idempotency across retries and approval resumption.
-- Documentation: explain decide-only best-effort timer reports, no durable delivery, missing evidence, acknowledgement limitations and the current HTTP-status mapping (including 4xx).
-- Tests: cover premature timers, failed delivery without retry, and 4xx/5xx outcome mapping. No plugin runtime changes.
+- Documentation: explain decide-only best-effort timer reports, no durable delivery, missing evidence, acknowledgement limitations and proxy-observed HTTP-status mapping.
+- Tests: cover premature timers, failed delivery without retry, and HTTP outcome mapping.
 
 ## 0.1.0
 

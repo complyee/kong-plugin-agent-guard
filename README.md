@@ -71,12 +71,36 @@ curl -X POST http://localhost:8001/services/payments/routes/transfers/plugins \
 | --- | --- | --- |
 | `gateway_url` | — (required) | Your workspace gateway address. |
 | `api_key` | — (required) | A Kong vault reference such as `{vault://env/acr-api-key}`, never the key itself. |
-| `agent_header` | `X-Agent-Id` | Request header naming the registered agent. |
-| `action_header` | `X-Acr-Action` | Request header naming the governed action; wins over `action_map`. |
-| `action_map` | `{}` | `"METHOD /path"` → action name. A request that matches nothing is refused. |
+| `agent_source` | `header` | `header`, `consumer` or `jwt_claim`; applies in every mode. Header mode is for development or an authenticated trusted proxy that strips/overwrites caller headers, not public-client authentication. |
+| `agent_header` | `X-Agent-Id` | Agent header used only in `header` mode. |
+| `consumer_id_field` | `custom_id` | In `consumer` mode, use authenticated Kong Consumer `custom_id` or explicitly select `id`. Register that exact value as the ACR agent. No fallback. |
+| `agent_claim` | `sub` | In `jwt_claim` mode, select a string claim from the verified server-side identity adapter described below. |
+| `action_header` | `X-Acr-Action` | Used only on unmapped routes with explicit header opt-in. |
+| `allow_action_header` | `false` | Allow an action header on an unmapped generic proxy route. Only enable behind a trusted action-selection boundary. Never overrides a mapped route. |
+| `action_map` | `{}` | `"METHOD /path"` → action name; always authoritative over client headers. Query parameters do not change the map lookup. Unmapped requests refuse unless header opt-in is enabled. |
 | `timeout_ms` | `3000` | Timeout for calls to Agent Control Room. |
 | `mode` | `decide` | `decide`, `verify` or `verify_jwt` (see below). |
 | `keys_ttl` | `3600` | How long the published verification keys are cached, in seconds. |
+
+## Request authority and payload binding
+
+For production, use `agent_source: consumer` with a preceding authentication plugin, or `jwt_claim` with a verified identity adapter. Missing identity, a missing selected Consumer field or a missing claim returns 403 without falling back to a caller header. Authentication must run before this plugin (priority 900); verify the actual order in your Kong deployment. Headers naming agents are not authentication.
+
+`jwt_claim` does **not** decode a bearer token or assume Kong's JWT/OIDC plugins expose a common `jwt_claims` field. A trusted preceding authentication plugin/adapter must verify signature, allowed algorithm, issuer, audience and expiry, then publish this per-request server-side contract:
+
+```lua
+-- Set only after successful authentication. Never populate from request headers
+-- or merely decoded JWT claims. Replace the selected claim with the verified value.
+kong.ctx.shared.acr_verified_identity = { claims = verified_identity_claims }
+```
+
+The adapter is deployment-specific; it is not bundled. Configure its claim mapping and test it with the actual authentication plugin. Do not copy the ACR grant token's subject into this slot as a substitute for authenticating the caller. In `verify_jwt`, caller authentication and ACR grant-signature verification are separate requirements.
+
+Kong hashes only a successfully read body. A genuinely absent or empty body is the empty string; a nil/error body read is refused (400 in `decide`, 403 in offline modes). Bodies buffered to disk are not read by this plugin: configure and test a bounded `client_body_buffer_size` and request-size limit appropriate to the route. No fallback hash is sent, and the request is not forwarded. Errors returned to clients do not expose temporary file paths.
+
+In `decide`, `resourceRef` includes path and query; those query values are sent to ACR, so do not put secrets or raw business content in them. This is a policy input, **not** an addition to the `acr-grant-v3` signed message. Offline modes still bind agent, action and body only: do not use a grant on routes where query parameters alter the authorized work unless that work is also bound in the body or a distinct action. Test any downstream body/query rewrite against what Kong judged.
+
+**Migration:** existing header-only action selection must add `action_map` entries or explicitly enable `allow_action_header` on a trusted generic proxy. Mapped routes now ignore conflicting action headers. This update does not add durable outcome reporting or exactly-once execution. Real Kong/authentication integration tests remain required before production rollout; the bundled tests use mocked APIs.
 
 ## Modes
 
@@ -101,9 +125,21 @@ Track the logical operation reference, ACR decision/approval ids and individual 
 
 ### Outcome reporting limitations
 
-In `decide` mode, the `log` phase schedules one `ngx.timer.at(0, ...)` callback for a forwarded grant. There is no retry queue, durable spool or delivery guarantee across worker restarts. A premature callback returns without sending; a worker crash, timer scheduling failure or failed report can leave execution evidence missing. Transport/decode errors returned by the client helper are warned about, but the current implementation does not log every loss or validate every HTTP/application acknowledgement.
+In `decide` mode, the `log` phase schedules one `ngx.timer.at(0, ...)` callback for a forwarded grant. There is no retry queue, durable spool or delivery guarantee across worker restarts. Scheduling failures log an error; premature shutdown callbacks and failed reports log warnings, all with the decision id. A hard worker crash can still lose a report without a warning. Non-2xx ACR replies, invalid JSON responses and application-error replies are treated as failures. Logs do not include HTTP response bodies or API keys. An HTTP acknowledgement is not a guarantee of business completion.
 
-The current mapping is HTTP status below 500 → `executed`, and 500 or above → `downstream_error`. That includes 4xx responses in `executed`: treat this as proxy-observed response evidence, not proof of business success. A timeout or 5xx also does not prove no side effect occurred. `verify` and `verify_jwt` currently do not schedule this report.
+Reports classify the **proxy-observed HTTP response**, with `detailCode` preserving its status:
+
+| Upstream status | Outcome | Detail code |
+| --- | --- | --- |
+| 2xx except 202 | `executed` | `http_<status>` |
+| 202 | `executed` | `http_202_accepted` — accepted, not confirmed complete |
+| 4xx | `aborted` | `http_<status>` |
+| 5xx (including gateway timeout responses) | `downstream_error` | `http_<status>` |
+| Other statuses (including redirects) | `aborted` | `http_<status>` |
+
+An upstream 202 is different from the plugin's policy-hold 202: a policy hold is never forwarded and never schedules a report. Neither `executed` nor `aborted` proves whether a business side effect committed; a timeout or 5xx does not prove no side effect occurred. Do not treat `http_202_accepted` as final completion. ACR stores one outcome per decision, so a later different completion report for the same decision conflicts rather than replacing this observation; keep authoritative completion and reconciliation in the upstream operation record.
+
+`verify` and `verify_jwt` never schedule outcome reports. They make no per-request decision/report call; `verify` still fetches verification keys on cache misses/rotation. Use the upstream service or orchestrator for durable completion reporting in offline architectures.
 
 The online authorization decision is recorded during the ACR decision call independently of this timer. A missing outcome report means execution is unknown from this evidence, not refused, pending or necessarily unexecuted. For reliable business completion evidence, use the upstream service or orchestrator's durable operation record and an acknowledged reporting/reconciliation process.
 
@@ -140,3 +176,13 @@ luajit spec/run.lua
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE).
+
+## Live integration tests
+
+`spec/run.lua` checks the plugin logic with plain LuaJIT. `spec/integration/` starts a real Kong Gateway (DB-less, in Docker) with the plugin loaded, a stand-in Agent Control Room and a stand-in upstream, then sends real requests: grants, holds, refusals, timeouts, route-map authority, Consumer identity, offline Ed25519 grants and outcome reports.
+
+```
+docker compose -f spec/integration/docker-compose.yml up --abort-on-container-exit --exit-code-from tests
+```
+
+GitHub Actions runs the same command on every push (`.github/workflows/integration.yml`). The stand-in service is for testing only and never part of a deployment.
