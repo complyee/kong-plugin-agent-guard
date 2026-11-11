@@ -1,32 +1,27 @@
-name: CI
+name: integration
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main]
   pull_request:
-    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
-  unit:
-    name: Unit tests (LuaJIT)
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install LuaJIT
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq luajit
-      - name: Run unit test suite
-        run: luajit spec/run.lua
-
-  integration:
-    name: Live Kong integration
+  kong:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        kong: ["3.9"]
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Run live Kong integration test harness
+      - name: Run live Kong suite
+        env:
+          KONG_VERSION: ${{ matrix.kong }}
         run: docker compose -f spec/integration/docker-compose.yml up --abort-on-container-exit --exit-code-from tests
-      - name: Clean up containers
+      - name: Kong logs on failure
+        if: failure()
+        run: docker compose -f spec/integration/docker-compose.yml logs kong
+      - name: Clean up
         if: always()
         run: docker compose -f spec/integration/docker-compose.yml down -v
