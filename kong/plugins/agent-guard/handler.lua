@@ -9,7 +9,7 @@ local client = require "kong.plugins.agent-guard.client"
 local crypto = require "kong.plugins.agent-guard.crypto"
 local request = require "kong.plugins.agent-guard.request"
 
-local AgentGuardHandler = { PRIORITY = 900, VERSION = "0.1.0" }
+local AgentGuardHandler = { PRIORITY = 900, VERSION = "0.1.1" }
 
 local function decide_access(conf)
   local action = request.resolve_action(conf)
