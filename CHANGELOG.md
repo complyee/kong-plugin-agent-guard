@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.1.1] - 2026-11-11
 
 - Documentation: separate policy holds, execution attempts and unknown outcomes; require stable upstream business-operation idempotency across retries and approval resumption.
 - Documentation: explain decide-only best-effort timer reports, no durable delivery, missing evidence, acknowledgement limitations and the current HTTP-status mapping (including 4xx).
