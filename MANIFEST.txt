@@ -1,0 +1,35 @@
+Kong Agent Guard — complete source handoff
+Target repository: https://github.com/complyee/kong-plugin-agent-guard
+Source commit: 7049e6afa0f6d4c9ba1f506268ba05f85516f67c
+Prepared UTC: 2026-11-11T20:25:50.874731+00:00
+Scope: entire clean kong/agent-guard source tree, including hidden files.
+Release status: unreleased working source containing Themes A/B/C; NOT a new published release.
+Existing rockspec remains 0.1.0-1 and points at v0.1.0; do not publish it as the new source.
+External GitHub/LuaRocks state has NOT been audited by this handoff.
+Checks: 95 LuaJIT unit tests passed; live Kong integration NOT run here (Docker unavailable).
+Source file count: 21
+Archive file count: 22 (includes this manifest)
+MANIFEST.txt excludes its own checksum to avoid self-reference.
+
+SHA-256  repository-relative path
+1dcda33ed592c9c31e4d461464ddd00e2a476498943f123c0bda8847b783d03e  .github/workflows/integration.yml
+696be6315c8dc353efbba3d5f0089bedff99e20a00d8af91c60f8978bed2ae88  .github/workflows/test.yml
+5a7265632f57d802d9994641b7ae62b0dc9eb4bd2eca005292c4ad7798eb1750  .luacheckrc
+913328dc49c46b21ba26f375f30c146a59fefeffcc79579b9e7a5c0bbf960dda  AGENTS.md
+e396a9397c444a0c13cff19714101c11e5e8cc23cb5f9fab035ec1a99c3fa5b5  CHANGELOG.md
+2c81b2c614ec700d673058fb3512fbeed2e2d906c636cbee1f82813a8b4c10b6  LICENSE
+8c00bd18690eebe8bf87958caf7cfb85cbb8b3991adf07f8dd60525aa54323aa  README.md
+20793f53713c4ed4c7314ce93f26398587cd2d1239dee7c41bb21bc7e5d18038  kong/plugins/agent-guard/client.lua
+5e2c15083ade7d0fed9b3a13766e5594f0489d8a34febbfbc68b5bffb981c792  kong/plugins/agent-guard/crypto.lua
+bac227303fec211cf592121c6fd9125295cc2e07a162ef22afa0f5c7f3622e8f  kong/plugins/agent-guard/handler.lua
+59dafd41bacbbfb3e6142e9956609406e78c09cf9fd158a81861c95bbb7868d0  kong/plugins/agent-guard/jwt_bind.lua
+0afcce593e522bb4ffea9972b684c598a7677f56da0a5daa5ae7ab6f02a3e0d7  kong/plugins/agent-guard/keys.lua
+52db8b29ef8bf2212567e0876f403a363441ca714c16aa134aa2e1d1f1e2ce01  kong/plugins/agent-guard/request.lua
+31694bacd0c889fc0a0c8d517c164285d5dc824b8ea6885ab0cef99073ba7f8e  kong/plugins/agent-guard/schema.lua
+295313e624ea3541084413fefd2e90cd80230cbd9cfa1d3f6c3af2a1e27813cf  kong/plugins/agent-guard/verify.lua
+86222395771649d3786b5f246490b93520e94c0497b0fbdda2a6047f216530e2  kong-plugin-agent-guard-0.1.0-1.rockspec
+cc5d2e941baa9bdd19ab101831df1d8b45532f4debb66db683ed13cab62e0c28  spec/integration/docker-compose.yml
+18c45a09e8bc85d0f839704cd95c9f25a8e1741114b5176a3270140d6a5cc99e  spec/integration/kong.yml
+c390ad45a22f6aaca3cb04f38700db463bbc1bdc486abd004a4c51df636cfb1f  spec/integration/mock/server.mjs
+0d09430bdb9de29deb53d00c18c493a0f15b246e6a580d6d5af30f6feac989d1  spec/integration/run.mjs
+c57ca9d225b4f26ea5914ee122e752238a7ff9ae77b7ae6c367dac29602bfd43  spec/run.lua

@@ -10,7 +10,11 @@ return {
       -- A Kong vault reference such as {vault://env/acr-api-key}, never the key itself
       { api_key = { type = "string", required = true, referenceable = true, encrypted = true } },
       { agent_header = { type = "string", default = "X-Agent-Id" } },
+      { agent_source = { type = "string", default = "header", one_of = { "header", "consumer", "jwt_claim" } } },
+      { consumer_id_field = { type = "string", default = "custom_id", one_of = { "custom_id", "id" } } },
+      { agent_claim = { type = "string", default = "sub" } },
       { action_header = { type = "string", default = "X-Acr-Action" } },
+      { allow_action_header = { type = "boolean", default = false } },
       -- "POST /payments/transfers" = "payments.transfer.create"
       { action_map = { type = "map", keys = { type = "string" }, values = { type = "string" }, default = {} } },
       { timeout_ms = { type = "integer", default = 3000 } },

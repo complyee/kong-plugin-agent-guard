@@ -6,7 +6,10 @@ local str = require "resty.string"
 local _M = {}
 
 function _M.payload_hash()
-  local body = kong.request.get_raw_body() or ""
+  local body, err = kong.request.get_raw_body()
+  -- Kong returns "" for a genuinely absent/empty body; nil means failure.
+  -- Do not rely on client-controlled Content-Length to distinguish these.
+  if err or type(body) ~= "string" then return nil, "Unable to read request body for cryptographic binding." end
   local h = resty_sha256:new()
   h:update(body)
   return str.to_hex(h:final())  -- only this hash is sent, never the body

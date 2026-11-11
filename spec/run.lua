@@ -215,7 +215,11 @@ package.preload["resty.sha256"] = function()
 end
 package.preload["resty.string"] = function() return { to_hex = to_hex } end
 package.preload["cjson.safe"] = function()
-  return { encode = json_encode, decode = json_decode }
+  return { encode = json_encode, decode = function(body)
+    local success, value = pcall(json_decode, body)
+    if not success then return nil, "Invalid JSON" end
+    return value
+  end }
 end
 package.preload["resty.http"] = function()
   return { new = function()
@@ -225,7 +229,7 @@ package.preload["resty.http"] = function()
         state.http_calls = (state.http_calls or 0) + 1
         state.last_http_request = options
         if state.http_err then return nil, state.http_err end
-        return { body = json_encode(state.http_body or {}) }
+        return { status = state.http_status or 200, body = state.http_raw_body or json_encode(state.http_body or {}) }
       end,
     }
   end }
@@ -255,9 +259,18 @@ local function setup(opts)
     method = opts.method or "POST",
     path = opts.path or "/payments/transfers",
     body = opts.body or "",
+    body_missing = opts.body_missing,
+    body_err = opts.body_err,
+    path_with_query = opts.path_with_query,
+    consumer = opts.consumer,
+    shared = opts.shared or {},
     status = opts.status or 200,
     http_body = opts.http_body,
     http_err = opts.http_err,
+    http_status = opts.http_status,
+    http_raw_body = opts.http_raw_body,
+    timer_err = opts.timer_err,
+    logs = { err = {}, warn = {} },
     verify_result = opts.verify_result,
     verify_message = nil,
     exited = nil,
@@ -269,14 +282,22 @@ local function setup(opts)
   _G.ngx = {
     md5 = sha256_hex,
     time = function() return state.now end,
-    timer = { at = function(_, fn, ...) state.timers[#state.timers + 1] = { fn = fn, args = { ... } } end },
+    timer = { at = function(_, fn, ...)
+      if state.timer_err then return nil, state.timer_err end
+      state.timers[#state.timers + 1] = { fn = fn, args = { ... } }
+      return true
+    end },
   }
   _G.kong = {
     request = {
       get_header = function(name) return state.headers[name] end,
       get_method = function() return state.method end,
       get_path = function() return state.path end,
-      get_raw_body = function() return state.body end,
+      get_path_with_query = function() return state.path_with_query or state.path end,
+      get_raw_body = function()
+        if state.body_missing then return nil, state.body_err end
+        return state.body, state.body_err
+      end,
     },
     response = {
       exit = function(status, body)
@@ -288,8 +309,12 @@ local function setup(opts)
     service = { request = {
       set_header = function(name, value) state.upstream_headers[name] = value end,
     } },
-    ctx = { plugin = {} },
-    log = { err = function() end, warn = function() end },
+    ctx = { plugin = {}, shared = state.shared },
+    client = { get_consumer = function() return state.consumer end },
+    log = {
+      err = function(...) state.logs.err[#state.logs.err + 1] = table.concat({ ... }) end,
+      warn = function(...) state.logs.warn[#state.logs.warn + 1] = table.concat({ ... }) end,
+    },
     cache = {
       get = function(_, key, _, loader, conf)
         if state.cache[key] == nil then state.cache[key] = loader(conf) end
@@ -325,6 +350,10 @@ local function base_conf(over)
     gateway_url = "https://ws.agent-cr.com/api/public/v1/gateway",
     api_key = "resolved-by-vault",
     agent_header = "X-Agent-Id",
+    agent_source = "header",
+    consumer_id_field = "custom_id",
+    agent_claim = "sub",
+    allow_action_header = false,
     action_header = "X-Acr-Action",
     action_map = { ["POST /payments/transfers"] = "payments.transfer.create" },
     timeout_ms = 3000,
@@ -371,6 +400,15 @@ end
 ok(fields.mode and fields.mode.default == "decide", "schema: mode defaults to decide")
 ok(fields.timeout_ms and fields.timeout_ms.default == 3000, "schema: timeout defaults to 3000 ms")
 ok(fields.keys_ttl and fields.keys_ttl.default == 3600, "schema: keys cache defaults to 3600 s")
+ok(fields.allow_action_header and fields.allow_action_header.default == false,
+  "schema: client action headers disabled by default")
+ok(fields.agent_source and fields.agent_source.default == "header"
+  and table.concat(fields.agent_source.one_of, ",") == "header,consumer,jwt_claim",
+  "schema: explicit identity sources with compatibility header default")
+ok(fields.consumer_id_field and fields.consumer_id_field.default == "custom_id",
+  "schema: Consumer identity defaults to custom_id")
+ok(fields.agent_claim and fields.agent_claim.default == "sub",
+  "schema: verified identity claim defaults to sub")
 ok(fields.api_key and fields.api_key.referenceable == true and fields.api_key.encrypted == true,
   "schema: api_key is a vault reference, never plain text")
 
@@ -379,11 +417,42 @@ ok(fields.api_key and fields.api_key.referenceable == true and fields.api_key.en
 ----------------------------------------------------------------------
 local request = require "kong.plugins.agent-guard.request"
 setup({ headers = { ["X-Acr-Action"] = "payments.refund.create" } })
-ok(request.resolve_action(base_conf()) == "payments.refund.create", "resolve_action: header wins")
+ok(request.resolve_action(base_conf()) == "payments.transfer.create", "resolve_action: route map overrides a conflicting header")
 setup({})
 ok(request.resolve_action(base_conf()) == "payments.transfer.create", "resolve_action: action map fallback")
 setup({ path = "/unmapped" })
 ok(request.resolve_action(base_conf()) == nil, "resolve_action: nil when nothing matches")
+setup({ path = "/unmapped", headers = { ["X-Acr-Action"] = "payments.refund.create" } })
+ok(request.resolve_action(base_conf()) == nil, "resolve_action: unmapped header refused by default")
+ok(request.resolve_action(base_conf({ allow_action_header = true })) == "payments.refund.create",
+  "resolve_action: unmapped header requires explicit opt-in")
+setup({ headers = { ["X-Acr-Action"] = "payments.refund.create" } })
+ok(request.resolve_action(base_conf({ allow_action_header = true })) == "payments.transfer.create",
+  "resolve_action: opt-in never overrides a mapped route")
+
+setup({ consumer = { id = "consumer-uuid", custom_id = "settlement-agent" },
+  headers = { ["X-Agent-Id"] = "spoofed-agent" } })
+ok(request.resolve_agent(base_conf({ agent_source = "consumer" })) == "settlement-agent",
+  "identity: Consumer custom_id overrides spoofed header")
+ok(request.resolve_agent(base_conf({ agent_source = "consumer", consumer_id_field = "id" })) == "consumer-uuid",
+  "identity: explicit Consumer id selection")
+setup({ consumer = { id = "consumer-uuid" }, headers = { ["X-Agent-Id"] = "spoofed-agent" } })
+ok(request.resolve_agent(base_conf({ agent_source = "consumer" })) == nil,
+  "identity: missing custom_id does not fall back to id or header")
+setup({ headers = { ["X-Agent-Id"] = "spoofed-agent" },
+  shared = { jwt_claims = { sub = "unverified-agent" } } })
+ok(request.resolve_agent(base_conf({ agent_source = "jwt_claim" })) == nil,
+  "identity: arbitrary decoded JWT claims are not the verified adapter contract")
+setup({ headers = { ["X-Agent-Id"] = "spoofed-agent" }, shared = {
+  acr_verified_identity = { claims = { sub = "jwt-agent", client_id = "client-agent" } } } })
+ok(request.resolve_agent(base_conf({ agent_source = "jwt_claim" })) == "jwt-agent",
+  "identity: verified adapter sub overrides spoofed header")
+ok(request.resolve_agent(base_conf({ agent_source = "jwt_claim", agent_claim = "client_id" })) == "client-agent",
+  "identity: explicit verified claim selection")
+ok(request.resolve_agent(base_conf({ agent_source = "jwt_claim", agent_claim = "absent" })) == nil,
+  "identity: absent verified claim has no header fallback")
+setup({ headers = { ["X-Agent-Id"] = "agent|injected" } })
+ok(request.resolve_agent(base_conf()) == nil, "identity: grant field separator is refused")
 
 ----------------------------------------------------------------------
 -- 5. decide mode
@@ -415,6 +484,40 @@ ok(state.exited and state.exited.status == 503, "decide unreachable: 503, fail c
 setup({ headers = { ["X-Agent-Id"] = "agent-1" }, path = "/unmapped" })
 run_access(base_conf())
 ok(state.exited and state.exited.status == 403, "decide unmapped route: 403")
+
+setup({ headers = { ["X-Agent-Id"] = "spoofed-agent" } })
+run_access(base_conf({ agent_source = "consumer" }))
+ok(state.exited and state.exited.status == 403 and (state.http_calls or 0) == 0,
+  "decide: absent authenticated Consumer refuses before ACR call")
+setup({ headers = { ["X-Agent-Id"] = "spoofed-agent", Authorization = "Bearer unverified" } })
+run_access(base_conf({ agent_source = "jwt_claim" }))
+ok(state.exited and state.exited.status == 403 and (state.http_calls or 0) == 0,
+  "decide: bearer token alone cannot supply verified identity")
+setup({ consumer = { custom_id = "settlement-agent" },
+  headers = { ["X-Agent-Id"] = "spoofed-agent", ["X-Acr-Action"] = "read_audit_log" },
+  path_with_query = "/payments/transfers?account=123", body = '{"amount":100}',
+  http_body = { decision = { effect = "grant", decisionId = "dec-query" } } })
+run_access(base_conf({ agent_source = "consumer" }))
+local submitted = json_decode(state.last_http_request.body).parameters
+ok(state.exited == nil and submitted.agent == "settlement-agent" and submitted.action == "payments.transfer.create",
+  "decide: ACR receives authenticated identity and route action despite spoofed headers")
+ok(submitted.resourceRef == "/payments/transfers?account=123",
+  "decide: resourceRef includes the query string")
+for _, headers in ipairs({ {}, { ["Content-Length"] = "100" }, { ["Transfer-Encoding"] = "chunked" } }) do
+  headers["X-Agent-Id"] = "agent-1"
+  setup({ headers = headers, body_missing = true, body_err = "buffered to file" })
+  run_access(base_conf())
+  ok(state.exited and state.exited.status == 400 and (state.http_calls or 0) == 0,
+    "decide: unreadable body refuses before authorization regardless of framing headers")
+end
+setup({ headers = { ["X-Agent-Id"] = "agent-1" }, body_missing = true })
+run_access(base_conf())
+ok(state.exited and state.exited.status == 400 and (state.http_calls or 0) == 0,
+  "decide: nil body without an error is not treated as empty")
+setup({ headers = { ["X-Agent-Id"] = "agent-1" }, body = "", body_err = "read failed" })
+run_access(base_conf())
+ok(state.exited and state.exited.status == 400 and (state.http_calls or 0) == 0,
+  "decide: body read error refuses even with a string result")
 
 ----------------------------------------------------------------------
 -- 6. verify mode (offline Ed25519 check)
@@ -468,6 +571,25 @@ ok(state.exited and state.exited.status == 403, "verify: an unknown key refuses 
 setup({ headers = VERIFY_HEADERS, path = "/unmapped", http_body = KEYS_BODY, verify_result = true })
 run_access(base_conf({ mode = "verify" }))
 ok(state.exited and state.exited.status == 403, "verify: an unmapped route refuses")
+setup({ headers = VERIFY_HEADERS, body_missing = true, body_err = "buffered to file", http_body = KEYS_BODY, verify_result = true })
+run_access(base_conf({ mode = "verify" }))
+ok(state.exited and state.exited.status == 403 and (state.http_calls or 0) == 0,
+  "verify: unreadable body refuses before key lookup or signature verification")
+setup({ headers = VERIFY_HEADERS, consumer = { custom_id = "agent-1" }, body = "hello world", http_body = KEYS_BODY, verify_result = true })
+run_access(base_conf({ mode = "verify", agent_source = "consumer" }))
+ok(state.exited == nil and state.verify_message == want_message,
+  "verify: signature reconstruction uses authenticated Consumer identity")
+setup({ headers = VERIFY_HEADERS, body = "hello world", http_body = KEYS_BODY, verify_result = true })
+run_access(base_conf({ mode = "verify", agent_source = "consumer" }))
+ok(state.exited and state.exited.status == 403,
+  "verify: missing Consumer cannot fall back to a client header")
+local spoofed_verify = {}
+for k, v in pairs(VERIFY_HEADERS) do spoofed_verify[k] = v end
+spoofed_verify["X-Acr-Action"] = "read_audit_log"
+setup({ headers = spoofed_verify, body = "hello world", http_body = KEYS_BODY, verify_result = true })
+run_access(base_conf({ mode = "verify" }))
+ok(state.exited == nil and state.verify_message == want_message,
+  "verify: spoofed action header cannot change the signed route action")
 
 ----------------------------------------------------------------------
 -- 7. verify_jwt mode (binding after a JWT plugin verified the token)
@@ -502,6 +624,20 @@ ok(state.exited and state.exited.status == 403, "verify_jwt: a token for another
 setup({ headers = { ["X-Agent-Id"] = "agent-1" }, body = "hello world" })
 run_access(base_conf({ mode = "verify_jwt" }))
 ok(state.exited and state.exited.status == 403, "verify_jwt: no bearer token refuses")
+setup({ headers = { ["X-Agent-Id"] = "agent-1", Authorization = "Bearer " .. grant_jwt(GOOD_CLAIMS) }, body_missing = true })
+run_access(base_conf({ mode = "verify_jwt" }))
+ok(state.exited and state.exited.status == 403, "verify_jwt: unreadable body cannot match a grant")
+setup({ headers = { ["X-Agent-Id"] = "spoofed-agent", Authorization = "Bearer " .. grant_jwt(GOOD_CLAIMS) },
+  shared = { acr_verified_identity = { claims = { sub = "agent-1" } } }, body = "hello world" })
+run_access(base_conf({ mode = "verify_jwt", agent_source = "jwt_claim" }))
+ok(state.exited == nil, "verify_jwt: binding uses identity from the verified adapter")
+setup({ headers = { ["X-Agent-Id"] = "agent-1", Authorization = "Bearer " .. grant_jwt(GOOD_CLAIMS) }, body = "hello world" })
+run_access(base_conf({ mode = "verify_jwt", agent_source = "jwt_claim" }))
+ok(state.exited and state.exited.status == 403, "verify_jwt: decoded grant claims do not authenticate the caller")
+setup({ headers = { ["X-Agent-Id"] = "agent-1", ["X-Acr-Action"] = "read_audit_log",
+  Authorization = "Bearer " .. grant_jwt(GOOD_CLAIMS) }, body = "hello world" })
+run_access(base_conf({ mode = "verify_jwt" }))
+ok(state.exited == nil, "verify_jwt: spoofed action header cannot change the bound route action")
 
 ----------------------------------------------------------------------
 -- 8. log phase: outcome reporting
@@ -512,7 +648,10 @@ kong.ctx.plugin.decision = { decisionId = "dec-1", payloadHash = "h" }
 handler.log(handler, base_conf())
 ok(#state.timers == 1, "log: one background report is scheduled")
 state.timers[1].fn(false, unpack(state.timers[1].args))
-ok(true, "log: the report timer runs without error")
+local first_report = json_decode(state.last_http_request.body).parameters
+ok(first_report.decisionId == "dec-1" and first_report.payloadHash == "h"
+  and first_report.outcome == "executed" and first_report.detailCode == "http_200",
+  "log: report preserves binding and HTTP detail")
 
 setup({ status = 502 })
 kong.ctx.plugin.decision = { decisionId = "dec-1", payloadHash = "h" }
@@ -541,8 +680,8 @@ kong.ctx.plugin.decision = { decisionId = "dec-1", payloadHash = "h" }
 handler.log(handler, base_conf())
 state.timers[1].fn(false, unpack(state.timers[1].args))
 local reported = json_decode(state.last_http_request.body)
-ok(reported.parameters.outcome == "executed",
-  "log: current 4xx mapping is proxy evidence, not business success")
+ok(reported.parameters.outcome == "aborted" and reported.parameters.detailCode == "http_403",
+  "log: upstream 403 is aborted, not executed")
 
 setup({ status = 502 })
 kong.ctx.plugin.decision = { decisionId = "dec-1", payloadHash = "h" }
@@ -551,6 +690,84 @@ state.timers[1].fn(false, unpack(state.timers[1].args))
 reported = json_decode(state.last_http_request.body)
 ok(reported.parameters.outcome == "downstream_error",
   "log: 5xx is reported as downstream_error, not proof of no side effect")
+
+-- Theme B regressions
+for _, case in ipairs({
+  { 201, "executed", "http_201" }, { 202, "executed", "http_202_accepted" },
+  { 204, "executed", "http_204" }, { 400, "aborted", "http_400" },
+  { 409, "aborted", "http_409" }, { 422, "aborted", "http_422" },
+  { 500, "downstream_error", "http_500" }, { 504, "downstream_error", "http_504" },
+  { 302, "aborted", "http_302" },
+}) do
+  setup({ status = case[1] })
+  kong.ctx.plugin.decision = { decisionId = "dec-status", payloadHash = "h" }
+  handler:log(base_conf())
+  state.timers[1].fn(false, unpack(state.timers[1].args))
+  local params = json_decode(state.last_http_request.body).parameters
+  ok(params.outcome == case[2] and params.detailCode == case[3], "log: HTTP " .. case[1] .. " mapping")
+end
+setup({ timer_err = "too many pending timers" })
+kong.ctx.plugin.decision = { decisionId = "dec-schedule", payloadHash = "h" }
+handler:log(base_conf())
+ok(#state.timers == 0 and (state.http_calls or 0) == 0 and #state.logs.err == 1
+  and state.logs.err[1]:find("dec%-schedule") and state.logs.err[1]:find("too many pending timers"),
+  "log: scheduling failure logs decision and cause without retry")
+setup({})
+kong.ctx.plugin.decision = { decisionId = "dec-shutdown", payloadHash = "h" }
+handler:log(base_conf())
+state.timers[1].fn(true, unpack(state.timers[1].args))
+ok((state.http_calls or 0) == 0 and #state.logs.warn == 1 and state.logs.warn[1]:find("dec%-shutdown"),
+  "log: premature shutdown logs decision without sending")
+for _, status in ipairs({ 301, 401, 409, 422, 500 }) do
+  setup({ http_status = status, http_body = { diagnostic = "sensitive-response-body" } })
+  kong.ctx.plugin.decision = { decisionId = "dec-http", payloadHash = "h" }
+  handler:log(base_conf())
+  state.timers[1].fn(false, unpack(state.timers[1].args))
+  local warning = state.logs.warn[1] or ""
+  ok(state.http_calls == 1 and #state.timers == 1 and warning:find("dec%-http")
+    and warning:find("HTTP " .. status) and not warning:find("sensitive%-response%-body")
+    and not warning:find("resolved%-by%-vault"), "log: HTTP " .. status .. " rejected safely without retry")
+end
+setup({ headers = { ["X-Agent-Id"] = "agent-1" }, http_status = 500,
+  http_body = { decision = { effect = "grant", decisionId = "invalid" } } })
+run_access(base_conf())
+ok(state.exited and state.exited.status == 503 and kong.ctx.plugin.decision == nil,
+  "decide: non-2xx grant-shaped answer fails closed")
+setup({ http_body = { error = { message = "sensitive-error-message" } } })
+kong.ctx.plugin.decision = { decisionId = "dec-app", payloadHash = "h" }
+handler:log(base_conf())
+state.timers[1].fn(false, unpack(state.timers[1].args))
+ok(#state.logs.warn == 1 and state.logs.warn[1]:find("ACR application error")
+  and not state.logs.warn[1]:find("sensitive%-error%-message"), "log: application error rejected safely")
+setup({ headers = { ["X-Agent-Id"] = "agent-1" }, http_body = { decision = { effect = "pending", approvalId = "ap-hold" } } })
+run_access(base_conf())
+handler:log(base_conf())
+ok(state.exited and state.exited.status == 202 and #state.timers == 0 and state.http_calls == 1,
+  "log: policy-hold 202 never reports upstream acceptance")
+for _, mode in ipairs({ "verify", "verify_jwt" }) do
+  setup({})
+  kong.ctx.plugin.decision = { decisionId = "dec-offline", payloadHash = "h" }
+  handler:log(base_conf({ mode = mode }))
+  ok(#state.timers == 0 and (state.http_calls or 0) == 0, "log: " .. mode .. " never schedules reports")
+end
+
+setup({ http_raw_body = "not JSON" })
+kong.ctx.plugin.decision = { decisionId = "dec-decode", payloadHash = "h" }
+handler:log(base_conf())
+state.timers[1].fn(false, unpack(state.timers[1].args))
+ok(#state.logs.warn == 1 and state.logs.warn[1]:find("Invalid JSON response"),
+  "log: malformed acknowledgement fails safely")
+setup({ http_err = "timeout" })
+kong.ctx.plugin.decision = { decisionId = "dec-timeout", payloadHash = "h" }
+handler:log(base_conf())
+state.timers[1].fn(false, unpack(state.timers[1].args))
+ok(state.http_calls == 1 and #state.logs.warn == 1 and state.logs.warn[1]:find("dec%-timeout")
+  and state.logs.warn[1]:find("timeout"), "log: network failure logs decision and cause")
+setup({ http_status = 201, http_body = { execution = { outcome = "executed" } } })
+kong.ctx.plugin.decision = { decisionId = "dec-ack", payloadHash = "h" }
+handler:log(base_conf())
+state.timers[1].fn(false, unpack(state.timers[1].args))
+ok(state.http_calls == 1 and #state.logs.warn == 0, "log: valid 2xx acknowledgement does not warn")
 
 ----------------------------------------------------------------------
 print(("---\n%d passed, %d failed"):format(passed, failed))

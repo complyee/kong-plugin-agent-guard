@@ -19,13 +19,15 @@ function _M.bind_grant_jwt(conf)
   local claims = seg and cjson.decode(b64.decode_base64url(seg) or "")
   if type(claims) ~= "table" or type(claims.acr) ~= "table" then return false end
 
-  local agent = kong.request.get_header(conf.agent_header) or ""
+  local agent = request.resolve_agent(conf) or ""
   local action = request.resolve_action(conf) or ""
   if agent == "" or action == "" then return false end  -- unknown agent or unmapped route: refuse
+  local hash = crypto.payload_hash()
+  if not hash then return false end
 
   return claims.sub == agent
     and claims.acr.action == action
-    and claims.acr.payloadHash == crypto.payload_hash()  -- Kong's own body hash
+    and claims.acr.payloadHash == hash  -- Kong's own body hash
 end
 
 return _M

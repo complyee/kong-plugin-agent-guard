@@ -9,18 +9,25 @@ local client = require "kong.plugins.agent-guard.client"
 local crypto = require "kong.plugins.agent-guard.crypto"
 local request = require "kong.plugins.agent-guard.request"
 
-local AgentGuardHandler = { PRIORITY = 900, VERSION = "0.1.1" }
+local AgentGuardHandler = { PRIORITY = 900, VERSION = "0.1.0" }
 
 local function decide_access(conf)
   local action = request.resolve_action(conf)
   if not action then
     return kong.response.exit(403, { message = "No governed action mapped for this route." })
   end
-  local hash = crypto.payload_hash()
+  local agent = request.resolve_agent(conf)
+  if not agent then
+    return kong.response.exit(403, { message = "Missing or invalid agent identity." })
+  end
+  local hash, hash_err = crypto.payload_hash()
+  if not hash then
+    return kong.response.exit(400, { message = hash_err })
+  end
   local params = {
-    agent = kong.request.get_header(conf.agent_header),
+    agent = agent,
     action = action,
-    resourceRef = kong.request.get_path(),
+    resourceRef = kong.request.get_path_with_query(),
     payloadHash = hash,
   }
   local idem = "kong-" .. ngx.md5(cjson.encode(params))
@@ -61,22 +68,39 @@ function AgentGuardHandler:access(conf)
   return decide_access(conf)
 end
 
-local function report(premature, conf, decision, outcome)
-  if premature then return end
+local function report(premature, conf, decision, outcome, detail_code)
+  if premature then
+    kong.log.warn("reportExecutionOutcome dropped on worker shutdown for decision ", decision.decisionId)
+    return
+  end
   local _, err = client.acr_call(conf, "reportExecutionOutcome", {
     decisionId = decision.decisionId,
     payloadHash = decision.payloadHash,
     outcome = outcome,
+    detailCode = detail_code,
   }, "outcome-" .. decision.decisionId)
-  if err then kong.log.warn("reportExecutionOutcome failed: ", err) end  -- evidence only
+  if err then
+    kong.log.warn("reportExecutionOutcome failed for decision ", decision.decisionId, ": ", err)
+  end  -- evidence only; no retries and no change to the response
 end
 
 function AgentGuardHandler:log(conf)
+  -- Offline verification never schedules outcome reports, even with shared state.
+  if conf.mode == "verify" or conf.mode == "verify_jwt" then return end
   local decision = kong.ctx.plugin.decision
   if not decision then return end
   local status = kong.response.get_status()
-  local outcome = (status < 500) and "executed" or "downstream_error"
-  ngx.timer.at(0, report, conf, decision, outcome)
+  local outcome = "aborted"
+  if status >= 200 and status < 300 then
+    outcome = "executed"
+  elseif status >= 500 then
+    outcome = "downstream_error"
+  end
+  local detail_code = status == 202 and "http_202_accepted" or "http_" .. tostring(status)
+  local scheduled, err = ngx.timer.at(0, report, conf, decision, outcome, detail_code)
+  if not scheduled then
+    kong.log.err("reportExecutionOutcome scheduling failed for decision ", decision.decisionId, ": ", err)
+  end
 end
 
 return AgentGuardHandler
