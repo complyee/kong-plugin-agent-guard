@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Documentation: separate policy holds, execution attempts and unknown outcomes; require stable upstream business-operation idempotency across retries and approval resumption.
+- Documentation: explain decide-only best-effort timer reports, no durable delivery, missing evidence, acknowledgement limitations and the current HTTP-status mapping (including 4xx).
+- Tests: cover premature timers, failed delivery without retry, and 4xx/5xx outcome mapping. No plugin runtime changes.
+
 ## 0.1.0
 
 - First release: `agent-guard` plugin for Kong Gateway 3.x.
