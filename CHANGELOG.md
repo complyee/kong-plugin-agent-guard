@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-11-12
+
+- Fix: offline `verify` loads the Ed25519 key as SubjectPublicKeyInfo DER (with params/JWK fallbacks) and logs load/verify failures; confirmed by the live Kong 3.9 suite (19/19).
 
 - Tests (Theme C): live integration suite (`spec/integration/`) runs a real Kong 3.9 in Docker against a stand-in ACR and upstream, covering decide, verify, Consumer identity and outcome reports; GitHub Actions workflow `integration.yml`.
 
@@ -12,7 +14,6 @@
 - Security (Theme A): route mappings always win; unmapped action headers require explicit `allow_action_header = true`. Existing header-only configurations must opt in or add route mappings.
 - Security: shared agent resolution across all modes, with authenticated Consumer and verified-JWT adapter sources; no fallback to client headers for these sources.
 - Security: body read errors refuse instead of hashing an empty string; online `resourceRef` includes the query string. Offline signatures still bind agent, action and body, not the query.
-- Release pending: no version/tag change yet; real Kong authentication integration checks remain required before production deployment.
 
 - Documentation: separate policy holds, execution attempts and unknown outcomes; require stable upstream business-operation idempotency across retries and approval resumption.
 - Documentation: explain decide-only best-effort timer reports, no durable delivery, missing evidence, acknowledgement limitations and proxy-observed HTTP-status mapping.
